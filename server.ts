@@ -1,5 +1,7 @@
 import { createServer } from "node:http";
 import next from "next";
+import { getDb } from "./lib/db";
+import { RunsRepo } from "./lib/db/runs-repo";
 
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.env.PORT ?? 3000);
@@ -16,10 +18,18 @@ async function main() {
   // One HTTP server hosts both Next (App Router + /api) and, later, Socket.io.
   const httpServer = createServer((req, res) => handle(req, res));
 
-  // SEAMS (wired by their own units; reserved here so U1 does not depend on them):
-  //   - U2: after the database initializes, run stale-run reconciliation.
-  //   - U6: attach the Socket.io server to `httpServer`, restricted to the
-  //         dashboard origin, with per-run rooms.
+  // Persistence (U2): open the database, reconcile runs orphaned in `running`
+  // by a previous crash, and prune to the keep-last-N limit.
+  const db = getDb();
+  const runs = new RunsRepo(db);
+  const reconciled = runs.reconcileStaleRuns();
+  const pruned = runs.pruneToLimit();
+  if (reconciled || pruned) {
+    console.log(`> db: reconciled ${reconciled} stale run(s), pruned ${pruned} run(s)`);
+  }
+
+  // SEAM (U6): attach the Socket.io server to `httpServer`, restricted to the
+  // dashboard origin, with per-run rooms.
 
   httpServer.listen(port, host, () => {
     console.log(`> Act Web UI ready on http://${host}:${port} (dev=${dev})`);
