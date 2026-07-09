@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import next from "next";
 import { getDb } from "./lib/db";
 import { RunsRepo } from "./lib/db/runs-repo";
+import { attachSocketServer } from "./lib/realtime/socket-server";
 
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.env.PORT ?? 3000);
@@ -28,8 +29,9 @@ async function main() {
     console.log(`> db: reconciled ${reconciled} stale run(s), pruned ${pruned} run(s)`);
   }
 
-  // SEAM (U6): attach the Socket.io server to `httpServer`, restricted to the
-  // dashboard origin, with per-run rooms.
+  // U6: attach the Socket.io server to the same HTTP server, restricted to the
+  // dashboard origin, with per-run rooms and reconnect-safe replay.
+  attachSocketServer(httpServer);
 
   httpServer.listen(port, host, () => {
     console.log(`> Act Web UI ready on http://${host}:${port} (dev=${dev})`);
