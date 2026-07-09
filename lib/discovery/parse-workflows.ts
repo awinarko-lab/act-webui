@@ -37,8 +37,9 @@ function fileStem(filePath: string): string {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function parseWorkflow(filePath: string, doc: any): DiscoveredWorkflow {
   // Guard against YAML 1.1 schemas that coerce the `on:` key to boolean true
-  // (js-yaml 5 does not, but be defensive).
-  const rawOn = doc.on ?? doc[true];
+  // (js-yaml 5 does not, but be defensive). A boolean-true key is stored under
+  // the string "true" in JS objects, so index by string.
+  const rawOn = doc.on ?? doc["true"];
   const rawJobs = (doc.jobs ?? {}) as Record<string, unknown>;
 
   const jobs: DiscoveredJob[] = Object.entries(rawJobs).map(([id, job]) => {
