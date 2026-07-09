@@ -1,3 +1,4 @@
+import "./lib/polyfills/async-local-storage";
 import { createServer } from "node:http";
 import next from "next";
 import { getDb } from "./lib/db";
