@@ -9,7 +9,8 @@ import {
 
 export const dynamic = "force-dynamic";
 
-// POST /api/runs/[id]/rerun — start a new run with the original's parameters (AE9).
+// POST /api/runs/[id]/rerun — start a new run reusing the original's workflow,
+// job, event, and trigger params (AE9).
 //
 // `dryRun` is intentionally dropped: a re-run executes (a previous dry-run's
 // point was already to validate). 404 when the original run is unknown. The
@@ -34,6 +35,7 @@ export async function POST(
       workflow: original.workflow,
       job: original.job,
       event: original.event,
+      params: original.params,
     });
     return NextResponse.json({ run }, { status: 201 });
   } catch (e) {

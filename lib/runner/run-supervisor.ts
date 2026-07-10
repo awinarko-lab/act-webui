@@ -66,6 +66,16 @@ class ChildProcessAdapter extends EventEmitter {
         this.emit("exit", 127, null);
       }
     });
+    // 'close' fires after stdio streams have ended — the safe point to
+    // finalize (trailing log data has all been delivered). Always emits,
+    // even after an 'error' event.
+    child.on("close", (code, signal) => {
+      if (!this.settled) {
+        this.settled = true;
+        this.emit("exit", code ?? null, signal ?? null);
+      }
+      this.emit("close");
+    });
   }
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
@@ -85,14 +95,20 @@ class ChildProcessAdapter extends EventEmitter {
 interface RunHandle {
   runId: string;
   process: SupervisedProcess;
-  /** Set the moment cancel(runId) is called; takes precedence over the exit code. */
+  /** Set only when cancel()'s kill() succeeds; takes precedence over exit code. */
   cancelRequested: boolean;
   /** True for dry-run (`act --validate`) runs. */
   dryRun: boolean;
   /** Captured stderr messages, used to derive a dry-run validity reason. */
   stderrLines: string[];
-  /** Flush callbacks for each stream's line buffer (called on exit). */
+  /** Flush callbacks for each stream's line buffer (idempotent, called on close). */
   readers: Array<{ flush: () => void }>;
+  /** Exit code captured on the 'exit' event; null until then or if signal-killed. */
+  exitCode: number | null;
+  /** Guards against double-finalization (close can fire after a stream error). */
+  finalized: boolean;
+  /** Pending SIGKILL escalation timer (R1); cleared on close. */
+  killTimer?: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -166,6 +182,8 @@ export class RunSupervisor {
       dryRun: !!req.dryRun,
       stderrLines: [],
       readers: [],
+      exitCode: null,
+      finalized: false,
     };
     this.registry.set(run.id, handle);
 
@@ -173,23 +191,42 @@ export class RunSupervisor {
     this.attachStream(run.id, process.stdout, "stdout", handle);
     this.attachStream(run.id, process.stderr, "stderr", handle);
 
-    // 6. Terminal status is derived on exit (cancel-intent-first, terminal-once).
-    // signal is intentionally ignored: cancel-intent takes precedence over it.
-    process.on("exit", (code) => this.onExit(run.id, handle, code));
+    // 6. 'exit' captures the code; 'close' (fires after stdio ends) triggers
+    //    finalization so trailing log lines arriving after 'exit' are not
+    //    dropped (C2). Cancel-intent takes precedence over the exit code.
+    process.on("exit", (code) => {
+      handle.exitCode = code;
+    });
+    process.on("close", () => this.onClose(run.id, handle));
 
     return run;
   }
 
   /**
-   * Cancel a running run. Sets the cancel-intent flag and signals the process
-   * group. Returns false (no-op) if the run is unknown or already complete — in
-   * which case the registry entry was already removed and the status is final.
+   * Cancel a running run. Signals the process group with SIGTERM and, only if
+   * the kill succeeded, sets the cancel-intent flag (C1 — so a run that already
+   * exited naturally isn't mislabeled cancelled). Schedules a forced SIGKILL
+   * escalation after a grace period (R1), cleared on close. Returns false if the
+   * run is unknown or already complete.
    */
   cancel(runId: string): boolean {
     const handle = this.registry.get(runId);
     if (!handle) return false;
-    handle.cancelRequested = true;
-    return handle.process.kill("SIGTERM");
+    // C1: set cancelRequested ONLY when kill succeeds, so a run that already
+    // exited naturally (kill returns false) is not mislabeled cancelled.
+    const killed = handle.process.kill("SIGTERM");
+    if (killed) {
+      handle.cancelRequested = true;
+      // R1: escalate to SIGKILL after a grace period if the process hasn't exited.
+      handle.killTimer = setTimeout(() => {
+        try {
+          handle.process.kill("SIGKILL");
+        } catch {
+          // Already reaped (ESRCH) or permissions — safe to ignore.
+        }
+      }, 5000);
+    }
+    return killed;
   }
 
   /** True while the run is being supervised (before its terminal exit). */
@@ -226,9 +263,25 @@ export class RunSupervisor {
     stream.on("data", (chunk: Buffer | string) => {
       buffer.push(typeof chunk === "string" ? chunk : decoder.write(chunk));
     });
-    // Flushed on stream end AND on process exit (see onExit) so a trailing
-    // partial line is durable before the terminal status is written. Idempotent.
+    // Flushed on stream end so a trailing partial line is durable before the
+    // terminal status is written. Idempotent — safe to call again on 'close'.
     stream.on("end", flush);
+    // R6: on a pipe error (EPIPE/EIO), flush the buffer and do NOT let it
+    // become an uncaught exception that crashes the supervisor.
+    stream.on("error", (err: Error) => {
+      console.error(
+        `[run-supervisor] ${label} stream error for run ${runId}:`,
+        err?.message ?? err,
+      );
+      try {
+        flush();
+      } catch (flushErr) {
+        console.error(
+          `[run-supervisor] failed to flush ${label} after error for run ${runId}:`,
+          flushErr,
+        );
+      }
+    });
   }
 
   /** Persist one parsed line and emit it for the realtime layer. */
@@ -248,39 +301,72 @@ export class RunSupervisor {
     this.events.emit("log", { runId, line: ev } satisfies LogStreamEvent);
   }
 
-  /** Derive terminal status (cancel-intent-first), persist it, emit, clean up. */
-  private onExit(runId: string, handle: RunHandle, code: number | null): void {
-    // Flush any trailing partial lines first, so every line is durable before
-    // the terminal status is written (better-sqlite3 is synchronous).
-    for (const r of handle.readers) r.flush();
+  /**
+   * Derive terminal status (cancel-intent-first), persist it, emit, clean up.
+   *
+   * Called on the process 'close' event (fires after stdio ends), NOT on 'exit'
+   * (C2): Node can deliver stdio `data` events after `exit`, so finalizing on
+   * `exit` would drop trailing log lines. Buffers are flushed on each stream's
+   * `end`/`error` event; this method re-flushes as an idempotent safety net
+   * before writing the terminal status (invariant: logs before status).
+   *
+   * Wrapped in try/catch/finally (R5): a DB failure (e.g. disk-full) in
+   * `updateStatus` or `appendLog` is logged but never crashes the supervisor or
+   * leaks the handle — `registry.delete` and the status/complete emits always
+   * run in `finally`.
+   */
+  private onClose(runId: string, handle: RunHandle): void {
+    if (handle.finalized) return;
+    handle.finalized = true;
 
-    const status: RunStatus = handle.cancelRequested
-      ? "cancelled"
-      : code === 0
-        ? "passed"
-        : "failed";
-
-    // For a completed dry-run, surface the validity verdict as a summary log.
-    if (handle.dryRun && status !== "cancelled") {
-      const verdict = interpretValidation(code, handle.stderrLines);
-      this.repo.appendLog({
-        run_id: runId,
-        job: null,
-        step: null,
-        level: verdict.valid ? "info" : "error",
-        message: verdict.valid
-          ? "Dry-run: workflow is valid"
-          : `Dry-run: workflow is invalid — ${verdict.reason}`,
-      });
+    // Clear any pending SIGKILL escalation timer (R1) — the process has closed.
+    if (handle.killTimer) {
+      clearTimeout(handle.killTimer);
+      handle.killTimer = undefined;
     }
 
-    // Terminal-once: a cancel arriving after this is a safe no-op.
-    this.repo.updateStatus(runId, status);
+    let status: RunStatus = "failed";
+    try {
+      // Flush any streams that haven't ended yet (idempotent if already flushed
+      // by the stream 'end'/'error' handler). Ensures every line is durable
+      // before the terminal status is written.
+      for (const r of handle.readers) r.flush();
 
-    const evt: StatusEvent = { runId, status };
-    this.events.emit("status", evt);
-    this.events.emit("complete", evt);
+      status = handle.cancelRequested
+        ? "cancelled"
+        : handle.exitCode === 0
+          ? "passed"
+          : "failed";
 
-    this.registry.delete(runId);
+      // For a completed dry-run, surface the validity verdict as a summary log.
+      if (handle.dryRun && status !== "cancelled") {
+        const verdict = interpretValidation(handle.exitCode, handle.stderrLines);
+        this.repo.appendLog({
+          run_id: runId,
+          job: null,
+          step: null,
+          level: verdict.valid ? "info" : "error",
+          message: verdict.valid
+            ? "Dry-run: workflow is valid"
+            : `Dry-run: workflow is invalid — ${verdict.reason}`,
+        });
+      }
+
+      // Terminal-once: a cancel arriving after this is a safe no-op.
+      this.repo.updateStatus(runId, status);
+    } catch (err) {
+      // R5: DB errors (e.g. disk-full) must not crash the supervisor or leak
+      // the handle. Log and fall through to emit + cleanup in finally.
+      console.error(
+        `[run-supervisor] failed to finalize run ${runId}:`,
+        err,
+      );
+    } finally {
+      // Emit + cleanup always run, even if DB operations threw.
+      const evt: StatusEvent = { runId, status };
+      this.events.emit("status", evt);
+      this.events.emit("complete", evt);
+      this.registry.delete(runId);
+    }
   }
 }

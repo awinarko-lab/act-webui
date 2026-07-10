@@ -14,6 +14,36 @@ export function allowedOrigin(): string {
   return `http://${host}:${port}`;
 }
 
+/**
+ * Normalize an origin/URL string to its canonical origin (protocol + host),
+ * or `null` when it cannot be parsed.
+ *
+ * `new URL(...).origin` yields e.g. `http://example.com` (default port 80
+ * omitted) or `http://example.com:3000` (explicit port kept). `localhost` and
+ * `127.0.0.1` are distinct hostnames and therefore compare as cross-origin — by
+ * design, so a page served from one cannot read data bound to the other.
+ */
+function normalizedOrigin(value: string): string | null {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the given `Origin` header value matches the allowed origin, compared
+ * by normalized origin (protocol + hostname + port) so the browser's
+ * default-port omission does not cause a false rejection (S3). Fails closed
+ * (returns `false`) on an unparseable origin or allowed-origin.
+ */
+export function isOriginAllowed(origin: string): boolean {
+  const allowed = normalizedOrigin(allowedOrigin());
+  const normalized = normalizedOrigin(origin);
+  if (allowed === null || normalized === null) return false;
+  return normalized === allowed;
+}
+
 /** Extract the `host:port` authority from an origin/URL string. */
 function authorityOf(origin: string): string {
   try {
@@ -38,11 +68,10 @@ function authorityOf(origin: string): string {
  * Returns a 403 {@link NextResponse} when the request is rejected, else `null`.
  */
 export function assertSameOrigin(request: NextRequest): NextResponse | null {
-  const allowed = allowedOrigin();
   const origin = request.headers.get("origin");
 
   if (origin != null) {
-    return origin === allowed
+    return isOriginAllowed(origin)
       ? null
       : NextResponse.json(
           { error: "cross-origin request rejected" },
@@ -52,6 +81,7 @@ export function assertSameOrigin(request: NextRequest): NextResponse | null {
 
   // No Origin header: same-origin browser requests (and non-browser clients)
   // carry a Host header we can compare against the allowed authority.
+  const allowed = allowedOrigin();
   const host = request.headers.get("host");
   return host === authorityOf(allowed)
     ? null

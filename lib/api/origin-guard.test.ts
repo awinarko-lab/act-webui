@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 
-import { allowedOrigin, assertSameOrigin } from "./origin-guard";
+import { allowedOrigin, assertSameOrigin, isOriginAllowed } from "./origin-guard";
 
 const ENV_KEYS = ["ALLOWED_ORIGIN", "HOST", "PORT"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -86,6 +86,45 @@ describe("origin-guard assertSameOrigin()", () => {
     expect(assertSameOrigin(postReq({ host: "ci.example.com" }))).toBeNull();
     // Mismatch.
     const res = assertSameOrigin(postReq({ host: "evil.example" }));
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(403);
+  });
+});
+
+describe("origin-guard origin normalization (S3)", () => {
+  it("allows the browser's default-port omission (http:80)", () => {
+    process.env.ALLOWED_ORIGIN = "http://dashboard.local:80";
+    // A browser omits the default port 80 from the Origin header; the old
+    // `===` comparison rejected this (`http://dashboard.local` !== `...:80`).
+    expect(
+      assertSameOrigin(postReq({ origin: "http://dashboard.local" })),
+    ).toBeNull();
+  });
+
+  it("allows the browser's default-port omission (https:443)", () => {
+    process.env.ALLOWED_ORIGIN = "https://ci.example.com:443";
+    expect(
+      assertSameOrigin(postReq({ origin: "https://ci.example.com" })),
+    ).toBeNull();
+  });
+
+  it("treats localhost and 127.0.0.1 as distinct (no aliasing)", () => {
+    // localhost and 127.0.0.1 may resolve to different loopbacks/hosts; treating
+    // them as same-origin would be an unsafe relaxation, so they are kept
+    // distinct. A page served from http://localhost:3000 is cross-origin to a
+    // server bound to 127.0.0.1 and is rejected.
+    process.env.ALLOWED_ORIGIN = "http://127.0.0.1:3000";
+    const res = assertSameOrigin(postReq({ origin: "http://localhost:3000" }));
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(403);
+    expect(isOriginAllowed("http://localhost:3000")).toBe(false);
+  });
+
+  it("rejects an unparseable Origin (fails closed)", () => {
+    process.env.ALLOWED_ORIGIN = "http://dashboard.local:3000";
+    // `null` Origin (sandboxed iframe / file:) is not a valid URL.
+    expect(isOriginAllowed("null")).toBe(false);
+    const res = assertSameOrigin(postReq({ origin: "null" }));
     expect(res).not.toBeNull();
     expect(res!.status).toBe(403);
   });

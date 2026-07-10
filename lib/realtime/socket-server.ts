@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { Server as HttpServer } from "node:http";
 import { Server, type Socket } from "socket.io";
 
-import { allowedOrigin } from "../api/origin-guard";
+import { allowedOrigin, isOriginAllowed } from "../api/origin-guard";
 import type { RunStatus, RunWithLogs } from "../db/types";
 import type { ParsedLogEvent } from "../runner/types";
 import { getRunsRepo, getSupervisor } from "../runtime";
@@ -83,6 +83,24 @@ export function attachSocketServer(
 
   const io = new Server(httpServer, {
     cors: { origin: allowedOrigin(), methods: ["GET", "POST"] },
+    // Hard cross-origin reject at the Engine.io level (S1). The `cors` option
+    // only sets Access-Control-Allow-Origin headers for the polling handshake —
+    // it does NOT refuse the connection, so a page forcing
+    // `transports:["websocket"]` skips that handshake and could otherwise join a
+    // room and read replayed/streamed logs (which may contain secrets).
+    // `allowRequest` runs for EVERY transport (polling and websocket) before the
+    // connection is established, so the bypass is closed regardless of transport.
+    // A browser always sends `Origin` on a WebSocket handshake, so a present
+    // mismatched Origin is rejected; an absent Origin (non-browser client, or a
+    // same-origin request that omitted it) is allowed to proceed.
+    allowRequest(req, fn) {
+      const origin = req.headers.origin;
+      if (origin != null && !isOriginAllowed(origin)) {
+        fn("origin not allowed", false);
+        return;
+      }
+      fn(null, true);
+    },
   });
 
   io.on("connection", (socket: Socket) => {

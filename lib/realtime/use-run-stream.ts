@@ -3,7 +3,12 @@
 import { useEffect, useState } from "react";
 import { io, type Socket } from "socket.io-client";
 
-import type { RunLogLine, RunRecord, RunStatus } from "../db/types";
+import {
+  TERMINAL_STATUSES,
+  type RunLogLine,
+  type RunRecord,
+  type RunStatus,
+} from "../db/types";
 import { LOG_EVENT, RUN_COMPLETE, RUN_STATUS, SUBSCRIBE } from "./events";
 import type { LogEventPayload, RunStatusPayload } from "./events";
 
@@ -70,8 +75,21 @@ export function useRunStream(runId: string | null): RunStreamState {
       .then((data: { run?: RunRecord; logs?: RunLogLine[] } | null) => {
         if (cancelled || !data) return;
         if (data.run) {
-          setRun(data.run);
-          setStatus(data.run.status);
+          const seedRun = data.run;
+          // Guard the seed against the socket race: if a terminal status
+          // (passed/failed/cancelled) already arrived over the socket, the HTTP
+          // response may be stale (read before completion) and report a
+          // non-terminal `running`. Never downgrade a terminal status to
+          // non-terminal — otherwise the run appears stuck with no later event
+          // to correct it. The seed's logs are still merged below.
+          setStatus((prev) => (isTerminal(prev) ? prev : seedRun.status));
+          setRun((prev) =>
+            prev != null &&
+            isTerminal(prev.status) &&
+            !isTerminal(seedRun.status)
+              ? prev
+              : seedRun,
+          );
         }
         if (data.logs) {
           const incomingLogs = data.logs;
@@ -89,6 +107,11 @@ export function useRunStream(runId: string | null): RunStreamState {
   }, [runId]);
 
   return { run, logs, status };
+}
+
+/** True if `status` is terminal (passed/failed/cancelled) — never downgraded. */
+function isTerminal(status: RunStatus | null): boolean {
+  return status != null && TERMINAL_STATUSES.includes(status);
 }
 
 /** Append a live (socket) log event, deduping against persisted lines by `seq`. */

@@ -1,5 +1,4 @@
-import { describe, it, expect } from "vitest";
-import { PassThrough } from "node:stream";
+import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
 
 import { openDatabase, type DB } from "../db/index";
@@ -15,36 +14,77 @@ import {
 } from "./types";
 
 /**
- * Test double for a spawned act process. `stdout`/`stderr` are real PassThrough
- * streams (so 'data' is delivered synchronously on write); the process itself is
- * an EventEmitter the test drives with `exit(code, signal)`. `kill()` mimics a
- * signal kill by emitting exit(null, signal).
+ * Synchronous test stream: emits 'data' on write() and 'end' on end()
+ * synchronously (unlike PassThrough which defers 'end' to nextTick). This lets
+ * tests assert finalization synchronously after proc.exit(), since the
+ * supervisor flushes buffers on the stream 'end' event and finalizes on the
+ * process 'close' event — both fire synchronously with this double.
+ */
+class SyncStream extends EventEmitter {
+  write(chunk: string | Buffer): boolean {
+    this.emit("data", chunk);
+    return true;
+  }
+  end(): void {
+    this.emit("end");
+  }
+}
+
+/**
+ * Test double for a spawned act process. `stdout`/`stderr` are SyncStreams (so
+ * 'data' and 'end' are delivered synchronously on write/end). The process
+ * itself is an EventEmitter the test drives with `exit(code, signal)`.
+ *
+ * `exit()` emits 'exit' then, if `autoClose` (default), ends the stdio streams
+ * and emits 'close' — simulating a real child where stdio pipes close after
+ * exit. Set `autoClose = false` to simulate data arriving after exit but before
+ * stdio closes, then call `close()` manually.
+ *
+ * `kill()` defers the exit to `process.nextTick` so the caller (supervisor
+ * `cancel`) can set state (e.g. `cancelRequested`) before finalization runs —
+ * matching real async process behavior where kill() sends a signal and the
+ * process exits sometime later.
  */
 class FakeProcess extends EventEmitter {
-  readonly stdout = new PassThrough();
-  readonly stderr = new PassThrough();
+  readonly stdout = new SyncStream();
+  readonly stderr = new SyncStream();
   readonly pid: number;
   killed = false;
   lastKillSignal?: NodeJS.Signals;
   private exited = false;
+  private closed = false;
+  autoClose = true;
 
   constructor(pid = 4242) {
     super();
     this.pid = pid;
   }
 
-  /** Drive the process 'exit' event (idempotent). */
+  /** Drive the process 'exit' event (idempotent). If autoClose, also ends stdio
+   * streams and emits 'close' synchronously. */
   exit(code: number | null, signal: NodeJS.Signals | null = null): void {
     if (this.exited) return;
     this.exited = true;
     this.emit("exit", code, signal);
+    if (this.autoClose) {
+      this.close();
+    }
+  }
+
+  /** End stdio streams and emit 'close'. Call manually when autoClose is false. */
+  close(): void {
+    if (this.closed) return;
+    this.stdout.end();
+    this.stderr.end();
+    this.closed = true;
+    this.emit("close");
   }
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
     if (this.exited) return false;
     this.killed = true;
     this.lastKillSignal = signal;
-    this.exit(null, signal);
+    process.nextTick(() => this.exit(null, signal));
     return true;
   }
 }
@@ -125,7 +165,7 @@ describe("RunSupervisor lifecycle", () => {
     expect(logs[1].level).toBe("error");
   });
 
-  it("cancel a running run → process killed, status cancelled, partial logs kept (AE7)", () => {
+  it("cancel a running run → process killed, status cancelled, partial logs kept (AE7)", async () => {
     const { repo, sup, last } = setup();
     const run = sup.start({ workflow: ".github/workflows/ci.yml" });
     const proc = last();
@@ -135,6 +175,9 @@ describe("RunSupervisor lifecycle", () => {
     expect(cancelled).toBe(true);
     expect(proc.killed).toBe(true);
     expect(proc.lastKillSignal).toBe("SIGTERM");
+
+    // kill() defers exit to nextTick so cancel() can set cancelRequested first.
+    await new Promise((r) => process.nextTick(r));
 
     // The signal-killed process exits null/non-zero, but cancel-intent wins.
     expect(repo.getRun(run.id)?.status).toBe("cancelled");
@@ -283,7 +326,7 @@ describe("RunSupervisor fail-fast pre-flight (AE1)", () => {
 });
 
 describe("RunSupervisor concurrency & events", () => {
-  it("two runs coexist independently in the registry", () => {
+  it("two runs coexist independently in the registry", async () => {
     const { repo, sup, procs } = setup();
     const r1 = sup.start({ workflow: ".github/workflows/ci.yml" });
     const r2 = sup.start({
@@ -302,8 +345,9 @@ describe("RunSupervisor concurrency & events", () => {
     expect(sup.isRunning(r2.id)).toBe(true);
     expect(sup.activeCount()).toBe(1);
 
-    // Cancel r2.
+    // Cancel r2 (kill defers exit to nextTick).
     expect(sup.cancel(r2.id)).toBe(true);
+    await new Promise((r) => process.nextTick(r));
     expect(repo.getRun(r2.id)?.status).toBe("cancelled");
     expect(sup.activeCount()).toBe(0);
   });
@@ -326,5 +370,95 @@ describe("RunSupervisor concurrency & events", () => {
 
     expect(statusEvents.length).toBe(1);
     expect(statusEvents[0]).toEqual({ runId: run.id, status: "passed" });
+  });
+});
+
+describe("RunSupervisor code-review fixes", () => {
+  it("cancel sets cancelRequested only when kill succeeds (C1)", () => {
+    const { repo, sup, last } = setup();
+    const run = sup.start({ workflow: ".github/workflows/ci.yml" });
+    const proc = last();
+    // Don't auto-close: exit emits 'exit' only, handle stays in registry.
+    proc.autoClose = false;
+    proc.exit(0); // natural exit — handle still registered (no 'close' yet)
+
+    // kill() returns false (process already exited) → cancelRequested NOT set.
+    expect(sup.cancel(run.id)).toBe(false);
+
+    // Finalize — status is "passed" (exit 0), NOT "cancelled".
+    proc.close();
+    expect(repo.getRun(run.id)?.status).toBe("passed");
+  });
+
+  it("a stream 'error' event does not crash the supervisor (R6)", () => {
+    const { repo, sup, last } = setup();
+    const run = sup.start({ workflow: ".github/workflows/ci.yml" });
+    const proc = last();
+    proc.stdout.write('{"msg":"before error","jobID":"build","level":"info"}\n');
+
+    // Suppress console.error from the error handler during this test.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // Emit a pipe error on stdout — should be caught, not thrown.
+    expect(() => proc.stdout.emit("error", new Error("EPIPE"))).not.toThrow();
+
+    errSpy.mockRestore();
+
+    // Supervisor survives — the run can still finalize normally.
+    proc.exit(0);
+    expect(repo.getRun(run.id)?.status).toBe("passed");
+    const { logs } = repo.getRunWithLogs(run.id)!;
+    expect(logs.some((l) => l.message === "before error")).toBe(true);
+  });
+
+  it("onClose resilience — if repo.updateStatus throws, handle is still removed (R5)", () => {
+    const { repo, sup, last } = setup();
+    const run = sup.start({ workflow: ".github/workflows/ci.yml" });
+
+    const completeEvents: StatusEvent[] = [];
+    sup.events.on("complete", (e: StatusEvent) => completeEvents.push(e));
+
+    // Inject a repo whose updateStatus throws once.
+    const errSpy = vi.spyOn(repo, "updateStatus").mockImplementationOnce(() => {
+      throw new Error("disk full");
+    });
+
+    // Suppress console.error from the catch block.
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const proc = last();
+    proc.exit(0);
+
+    logSpy.mockRestore();
+
+    // The handle is removed even though updateStatus threw.
+    expect(sup.isRunning(run.id)).toBe(false);
+    expect(sup.activeCount()).toBe(0);
+    // The 'complete' event still fires (R5: emits always run in finally).
+    expect(completeEvents.length).toBe(1);
+    expect(completeEvents[0]).toEqual({ runId: run.id, status: "passed" });
+
+    errSpy.mockRestore();
+  });
+
+  it("trailing data after exit is captured, not dropped (C2)", () => {
+    const { repo, sup, last } = setup();
+    const run = sup.start({ workflow: ".github/workflows/ci.yml" });
+    const proc = last();
+    // Don't auto-close: simulate data arriving after exit but before stdio closes.
+    proc.autoClose = false;
+
+    proc.stdout.write('{"msg":"before exit","jobID":"build","level":"info"}\n');
+    proc.exit(0); // 'exit' fires — supervisor stores code but does NOT finalize.
+
+    // Data arrives after exit but before streams end — must not be dropped.
+    proc.stdout.write('{"msg":"after exit","jobID":"build","level":"info"}\n');
+
+    // Now stdio closes — supervisor flushes buffers and finalizes.
+    proc.close();
+
+    const { logs } = repo.getRunWithLogs(run.id)!;
+    expect(logs.map((l) => l.message)).toEqual(["before exit", "after exit"]);
+    expect(repo.getRun(run.id)?.status).toBe("passed");
   });
 });

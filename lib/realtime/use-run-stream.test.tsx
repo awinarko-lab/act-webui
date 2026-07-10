@@ -7,7 +7,7 @@ vi.mock("socket.io-client", () => ({ io: vi.fn() }));
 
 import { io } from "socket.io-client";
 import type { RunRecord } from "@/lib/db/types";
-import { LOG_EVENT, RUN_STATUS, SUBSCRIBE } from "@/lib/realtime/events";
+import { LOG_EVENT, RUN_COMPLETE, RUN_STATUS, SUBSCRIBE } from "@/lib/realtime/events";
 import { useRunStream } from "@/lib/realtime/use-run-stream";
 
 const mockedIo = vi.mocked(io);
@@ -193,6 +193,61 @@ describe("useRunStream", () => {
       expect(screen.getByTestId("logs").textContent).toContain("seeded"),
     );
     expect(screen.getByTestId("logs").textContent).toBe("seeded");
+  });
+
+  it("does not let a stale HTTP seed downgrade a terminal status from the socket", async () => {
+    // Deferred fetch so the HTTP seed resolves only AFTER the socket has
+    // delivered a terminal status — the race that regressed the run to `running`.
+    let resolveSeed!: (res: {
+      ok: boolean;
+      json: () => Promise<unknown>;
+    }) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockReturnValue(
+        new Promise<{ ok: boolean; json: () => Promise<unknown> }>((resolve) => {
+          resolveSeed = resolve;
+        }),
+      ),
+    );
+
+    render(<Probe runId="run-1" />);
+
+    // Socket delivers a terminal status before the HTTP seed resolves.
+    act(() => {
+      mockSocket.__receive(RUN_COMPLETE, { runId: "run-1", status: "passed" });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("status").textContent).toBe("passed"),
+    );
+
+    // The stale HTTP seed resolves with `running` (read before completion).
+    resolveSeed({
+      ok: true,
+      json: async () => ({
+        run: { ...baseRun, status: "running" },
+        logs: [
+          {
+            run_id: "run-1",
+            seq: 5,
+            job: "build",
+            step: "s",
+            level: "info",
+            message: "seeded-after-terminal",
+            ts: "2026-07-09T00:00:03.000Z",
+          },
+        ],
+      }),
+    });
+
+    // The seed's logs are merged (proving the fetch .then ran), but the terminal
+    // status is preserved — the stale `running` does not downgrade `passed`.
+    await waitFor(() =>
+      expect(screen.getByTestId("logs").textContent).toContain(
+        "seeded-after-terminal",
+      ),
+    );
+    expect(screen.getByTestId("status").textContent).toBe("passed");
   });
 
   it("disconnects the socket on unmount", async () => {

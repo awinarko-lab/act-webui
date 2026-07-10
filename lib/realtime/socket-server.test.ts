@@ -276,4 +276,64 @@ describe("attachSocketServer", () => {
     const logs = await logPromise;
     expect(logs).toHaveLength(1);
   });
+
+  it("rejects a cross-origin websocket client so it cannot read replayed logs (S1)", async () => {
+    const runId = seedRun({ logs: ["secret line"] });
+
+    // Force websocket transport — this is the bypass: it skips the polling
+    // handshake whose CORS headers used to be the only origin check.
+    const client = ioc(origin, {
+      transports: ["websocket"],
+      extraHeaders: { origin: "https://evil.example" },
+    });
+    clients.push(client);
+
+    // `allowRequest` rejects at the Engine.io level, so the connection is never
+    // established (connect_error, never connect).
+    const outcome = await new Promise<"connected" | "refused">((res) => {
+      client.once("connect", () => res("connected"));
+      client.once("connect_error", () => res("refused"));
+    });
+    expect(outcome).toBe("refused");
+
+    // A refused client cannot join the room or receive replayed logs (which may
+    // contain secrets).
+    let received = false;
+    client.on(LOG_EVENT, () => {
+      received = true;
+    });
+    client.emit(SUBSCRIBE, { runId });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(received).toBe(false);
+  });
+
+  it("rejects a cross-origin polling client too (S1, all transports)", async () => {
+    const client = ioc(origin, {
+      transports: ["polling"],
+      extraHeaders: { origin: "https://evil.example" },
+    });
+    clients.push(client);
+
+    const outcome = await new Promise<"connected" | "refused">((res) => {
+      client.once("connect", () => res("connected"));
+      client.once("connect_error", () => res("refused"));
+    });
+    expect(outcome).toBe("refused");
+  });
+
+  it("allows a same-origin websocket client to join and receive logs", async () => {
+    // Sanity check: the allowRequest hard-reject does not block a same-origin
+    // client that carries the allowed Origin header.
+    const runId = seedRun({ logs: ["same-origin line"] });
+    const client = ioc(origin, {
+      transports: ["websocket"],
+      extraHeaders: { origin },
+    });
+    clients.push(client);
+
+    const logsPromise = nextN<LogEventPayload>(client, LOG_EVENT, 1);
+    await subscribe(client, runId);
+    const [payload] = await logsPromise;
+    expect(payload.message).toBe("same-origin line");
+  });
 });

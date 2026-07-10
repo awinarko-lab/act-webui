@@ -76,6 +76,33 @@ describe("POST /api/runs/[id]/rerun", () => {
     expect(captured[0].dryRun).toBeFalsy();
   });
 
+  it("forwards the original run's params to the new run (AE9)", async () => {
+    const params = { ref: "refs/heads/main", sha: "abc123" };
+    const original = makeRun({ params });
+    mockedGetRunsRepo.mockReturnValue({
+      getRun: () => original,
+    } as unknown as RunsRepo);
+
+    const captured: RunRequest[] = [];
+    const newRun = makeRun({ id: "run-2", status: "running" });
+    mockedGetSupervisor.mockReturnValue({
+      start: (req: RunRequest) => {
+        captured.push(req);
+        return newRun;
+      },
+    } as unknown as RunSupervisor);
+
+    const res = await POST(postReq("run-1"), {
+      params: Promise.resolve({ id: "run-1" }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(captured).toHaveLength(1);
+    expect(captured[0].params).toEqual(params);
+    // Re-run executes — dryRun is dropped.
+    expect(captured[0].dryRun).toBeFalsy();
+  });
+
   it("returns 404 when the original run does not exist", async () => {
     mockedGetRunsRepo.mockReturnValue({
       getRun: () => undefined,

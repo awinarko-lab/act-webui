@@ -44,6 +44,9 @@ export interface SupervisedProcess {
     event: "exit",
     listener: (code: number | null, signal: NodeJS.Signals | null) => void,
   ): this;
+  /** Fires after the process has exited AND its stdio streams have closed —
+   * the safe point to finalize (all trailing log data has been delivered). */
+  on(event: "close", listener: () => void): this;
   /** Kill the process (in production, the whole process group). */
   kill(signal?: NodeJS.Signals): boolean;
 }
