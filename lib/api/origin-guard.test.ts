@@ -44,6 +44,18 @@ describe("origin-guard allowedOrigin()", () => {
     process.env.ALLOWED_ORIGIN = "https://ci.example.com";
     expect(allowedOrigin()).toBe("https://ci.example.com");
   });
+
+  it("returns empty sentinel when HOST is 0.0.0.0 (bind-all mode)", () => {
+    process.env.HOST = "0.0.0.0";
+    process.env.PORT = "3000";
+    expect(allowedOrigin()).toBe("");
+  });
+
+  it("ALLOWED_ORIGIN overrides 0.0.0.0 bind-all mode", () => {
+    process.env.HOST = "0.0.0.0";
+    process.env.ALLOWED_ORIGIN = "https://ci.example.com";
+    expect(allowedOrigin()).toBe("https://ci.example.com");
+  });
 });
 
 describe("origin-guard assertSameOrigin()", () => {
@@ -127,5 +139,72 @@ describe("origin-guard origin normalization (S3)", () => {
     const res = assertSameOrigin(postReq({ origin: "null" }));
     expect(res).not.toBeNull();
     expect(res!.status).toBe(403);
+  });
+});
+
+describe("origin-guard bind-all mode (HOST=0.0.0.0)", () => {
+  beforeEach(() => {
+    process.env.HOST = "0.0.0.0";
+    process.env.PORT = "3000";
+  });
+
+  it("accepts any IP with correct port via Origin header", () => {
+    // Tailscale IP
+    expect(
+      assertSameOrigin(postReq({ origin: "http://100.95.23.42:3000" })),
+    ).toBeNull();
+    // Local network IP
+    expect(
+      assertSameOrigin(postReq({ origin: "http://192.168.1.100:3000" })),
+    ).toBeNull();
+    // localhost
+    expect(
+      assertSameOrigin(postReq({ origin: "http://localhost:3000" })),
+    ).toBeNull();
+  });
+
+  it("rejects wrong port in bind-all mode", () => {
+    const res = assertSameOrigin(postReq({ origin: "http://192.168.1.100:8080" }));
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(403);
+  });
+
+  it("rejects https in bind-all mode", () => {
+    const res = assertSameOrigin(postReq({ origin: "https://192.168.1.100:3000" }));
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(403);
+  });
+
+  it("accepts any Host with correct port when Origin is absent", () => {
+    expect(
+      assertSameOrigin(postReq({ host: "100.95.23.42:3000" })),
+    ).toBeNull();
+    expect(
+      assertSameOrigin(postReq({ host: "192.168.1.100:3000" })),
+    ).toBeNull();
+    expect(
+      assertSameOrigin(postReq({ host: "localhost:3000" })),
+    ).toBeNull();
+  });
+
+  it("rejects wrong port in Host header in bind-all mode", () => {
+    const res = assertSameOrigin(postReq({ host: "192.168.1.100:8080" }));
+    expect(res).not.toBeNull();
+    expect(res!.status).toBe(403);
+  });
+
+  it("isOriginAllowed accepts any IP with correct port", () => {
+    expect(isOriginAllowed("http://100.95.23.42:3000")).toBe(true);
+    expect(isOriginAllowed("http://192.168.1.100:3000")).toBe(true);
+    expect(isOriginAllowed("http://localhost:3000")).toBe(true);
+    expect(isOriginAllowed("http://192.168.1.100:8080")).toBe(false);
+    expect(isOriginAllowed("https://192.168.1.100:3000")).toBe(false);
+  });
+
+  it("ALLOWED_ORIGIN overrides bind-all mode", () => {
+    process.env.ALLOWED_ORIGIN = "https://locked-down.example.com";
+    expect(allowedOrigin()).toBe("https://locked-down.example.com");
+    expect(isOriginAllowed("http://192.168.1.100:3000")).toBe(false);
+    expect(isOriginAllowed("https://locked-down.example.com")).toBe(true);
   });
 });

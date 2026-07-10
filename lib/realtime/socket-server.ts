@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { Server as HttpServer } from "node:http";
 import { Server, type Socket } from "socket.io";
 
-import { allowedOrigin, isOriginAllowed } from "../api/origin-guard";
+import { allowedOrigin, isOriginAllowed, BIND_ALL_SENTINEL } from "../api/origin-guard";
 import { type RunWithLogs, TERMINAL_STATUS_SET } from "../db/types";
 import type { ParsedLogEvent } from "../runner/types";
 import { getRunsRepo, getSupervisor } from "../runtime";
@@ -75,8 +75,11 @@ export function attachSocketServer(
   const supervisor = options.supervisor ?? getSupervisor();
   const repo = options.repo ?? getRunsRepo();
 
+  // In bind-all mode, allow any origin for Socket.io.
+  const socketOrigin = allowedOrigin() === BIND_ALL_SENTINEL ? "*" : allowedOrigin();
+
   const io = new Server(httpServer, {
-    cors: { origin: allowedOrigin(), methods: ["GET", "POST"] },
+    cors: { origin: socketOrigin, methods: ["GET", "POST"] },
     // Hard cross-origin reject at the Engine.io level (S1). The `cors` option
     // only sets Access-Control-Allow-Origin headers for the polling handshake —
     // it does NOT refuse the connection, so a page forcing

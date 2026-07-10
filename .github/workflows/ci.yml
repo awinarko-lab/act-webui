@@ -1,0 +1,22 @@
+name: Test CI
+
+on:
+  push:
+    branches: [feat/act-web-ui]
+  pull_request:
+    branches: [feat/act-web-ui]
+
+jobs:
+  greet:
+    name: Greeting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hello
+        run: echo "Hello from Act Web UI CI!"
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Say something
+        run: echo "Lint check passed!"
