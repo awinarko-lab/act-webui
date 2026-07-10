@@ -35,24 +35,28 @@ function groupByJob(lines: RunLogLine[]): LogGroup[] {
   return order.map((job) => ({ job, lines: groups.get(job)! }));
 }
 
-/** Tailwind text color per log level (case-insensitive). */
+/**
+ * Tailwind text color per log level (case-insensitive). The log panel always
+ * renders on a dark background (`bg-zinc-950`), so colors are fixed light
+ * variants — not theme-driven `text-foreground`, which is black in light mode
+ * and would be invisible on the dark panel.
+ */
 function levelClassName(level: string | null): string {
   const normalized = (level ?? "").toLowerCase();
   switch (normalized) {
     case "error":
     case "fatal":
     case "critical":
-      return "text-red-600 dark:text-red-400";
+      return "text-red-400";
     case "warn":
     case "warning":
-      return "text-amber-600 dark:text-amber-400";
+      return "text-amber-300";
     case "debug":
     case "trace":
-      return "text-muted-foreground";
+      return "text-zinc-400";
     case "info":
-      return "text-foreground";
     default:
-      return "text-foreground";
+      return "text-zinc-100";
   }
 }
 

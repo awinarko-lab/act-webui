@@ -53,13 +53,14 @@ describe("LogViewer", () => {
 
     render(<LogViewer logs={logs} />);
 
-    // The message span carries the level color class.
+    // The message span carries the level color class. Colors are fixed light
+    // variants because the log panel always renders on a dark background.
     const errorLine = screen.getByText("boom");
-    expect(errorLine).toHaveClass("text-red-600");
+    expect(errorLine).toHaveClass("text-red-400");
 
     const infoLine = screen.getByText("ok");
-    expect(infoLine).toHaveClass("text-foreground");
-    expect(infoLine).not.toHaveClass("text-red-600");
+    expect(infoLine).toHaveClass("text-zinc-100");
+    expect(infoLine).not.toHaveClass("text-red-400");
   });
 
   it("renders without throwing as logs grow (auto-scroll hook is safe)", () => {
