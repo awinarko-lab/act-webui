@@ -1,0 +1,16 @@
+name: Hello CI
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  hello:
+    name: Say Hello
+    runs-on: ubuntu-latest
+    steps:
+      - name: Greet
+        run: echo "Hello from act! Running a simple CI workflow."
+      - name: Show runner info
+        run: |
+          echo "Runner OS: ${{ runner.os }}"
+          echo "Workspace: ${{ github.workspace }}"
