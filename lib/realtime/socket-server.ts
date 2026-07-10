@@ -3,7 +3,7 @@ import type { Server as HttpServer } from "node:http";
 import { Server, type Socket } from "socket.io";
 
 import { allowedOrigin, isOriginAllowed } from "../api/origin-guard";
-import type { RunStatus, RunWithLogs } from "../db/types";
+import { type RunWithLogs, TERMINAL_STATUS_SET } from "../db/types";
 import type { ParsedLogEvent } from "../runner/types";
 import { getRunsRepo, getSupervisor } from "../runtime";
 import {
@@ -40,12 +40,6 @@ export interface AttachSocketServerOptions {
   /** Defaults to {@link getRunsRepo}. */
   repo?: RepoLike;
 }
-
-const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set([
-  "passed",
-  "failed",
-  "cancelled",
-]);
 
 /**
  * Tracks which supervisor `EventEmitter`s already have forwarding listeners
@@ -148,7 +142,7 @@ function replayRun(socket: Socket, runId: string, repo: RepoLike): void {
     status: result.run.status,
   };
   socket.emit(RUN_STATUS, statusPayload);
-  if (TERMINAL_STATUSES.has(result.run.status)) {
+  if (TERMINAL_STATUS_SET.has(result.run.status)) {
     socket.emit(RUN_COMPLETE, statusPayload);
   }
 }

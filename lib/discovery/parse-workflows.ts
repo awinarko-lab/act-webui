@@ -34,8 +34,10 @@ function fileStem(filePath: string): string {
   return basename(filePath).replace(/\.(yml|yaml)$/i, "");
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function parseWorkflow(filePath: string, doc: any): DiscoveredWorkflow {
+function parseWorkflow(
+  filePath: string,
+  doc: Record<string, unknown>,
+): DiscoveredWorkflow {
   // Guard against YAML 1.1 schemas that coerce the `on:` key to boolean true
   // (js-yaml 5 does not, but be defensive). A boolean-true key is stored under
   // the string "true" in JS objects, so index by string.
@@ -98,7 +100,9 @@ export function discoverWorkflows(
         errors.push({ path: relPath, message: "workflow is not a YAML mapping" });
         continue;
       }
-      workflows.push(parseWorkflow(relPath, doc));
+      // The guard above proves `doc` is a non-null, non-array object; assert the
+      // index signature the parser expects.
+      workflows.push(parseWorkflow(relPath, doc as Record<string, unknown>));
     } catch (e) {
       errors.push({ path: relPath, message: e instanceof Error ? e.message : String(e) });
     }

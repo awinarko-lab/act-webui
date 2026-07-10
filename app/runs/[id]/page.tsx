@@ -51,11 +51,7 @@ export default function RunDetailPage() {
     } catch (e) {
       setRerunning(false);
       setActionError(
-        e instanceof ApiError
-          ? e.message
-          : e instanceof Error
-            ? e.message
-            : "Failed to start re-run",
+        e instanceof Error ? e.message : "Failed to start re-run",
       );
     }
   };

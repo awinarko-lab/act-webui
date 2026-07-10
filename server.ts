@@ -32,11 +32,29 @@ async function main() {
 
   // U6: attach the Socket.io server to the same HTTP server, restricted to the
   // dashboard origin, with per-run rooms and reconnect-safe replay.
-  attachSocketServer(httpServer);
+  const io = attachSocketServer(httpServer);
 
   httpServer.listen(port, host, () => {
     console.log(`> Act Web UI ready on http://${host}:${port} (dev=${dev})`);
   });
+
+  // R4: graceful shutdown. Close the socket server first (stops accepting new
+  // connections), then the HTTP server, then the database. A flag guards a
+  // double-signal (SIGINT then SIGTERM, or vice versa) so the handlers are
+  // idempotent. The supervisor's in-flight runs are detached and reconciled on
+  // next boot — that is the documented recovery path.
+  let shuttingDown = false;
+  const shutdown = (): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log("> shutting down...");
+    io.close();
+    httpServer.close();
+    getDb().close();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 main().catch((err) => {

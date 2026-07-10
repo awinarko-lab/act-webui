@@ -3,6 +3,11 @@ export type RunStatus = "running" | "passed" | "failed" | "cancelled";
 /** A status that marks a run complete; written at most once per run. */
 export const TERMINAL_STATUSES: RunStatus[] = ["passed", "failed", "cancelled"];
 
+/** Set form of {@link TERMINAL_STATUSES} for O(1) membership checks. */
+export const TERMINAL_STATUS_SET: ReadonlySet<RunStatus> = new Set(
+  TERMINAL_STATUSES,
+);
+
 export interface NewRun {
   /** Workflow file path or identifier, e.g. ".github/workflows/ci.yml". */
   workflow: string;

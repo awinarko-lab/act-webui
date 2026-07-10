@@ -7,7 +7,6 @@ import { TriangleAlertIcon, LoaderIcon } from "lucide-react";
 import { RunTriggerPanel, type RunPayload } from "@/components/run-trigger-panel";
 import { WorkflowList } from "@/components/workflow-list";
 import {
-  ApiError,
   createRun,
   getHealth,
   getWorkflows,
@@ -77,11 +76,7 @@ export default function HomePage() {
     } catch (e) {
       setSubmitting(false);
       setTriggerError(
-        e instanceof ApiError
-          ? e.message
-          : e instanceof Error
-            ? e.message
-            : "Failed to start run",
+        e instanceof Error ? e.message : "Failed to start run",
       );
     }
   };

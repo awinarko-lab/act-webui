@@ -1,11 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { assertSameOrigin } from "@/lib/api/origin-guard";
+import { mapSupervisorError } from "@/lib/api/supervisor-errors";
 import { getRunsRepo, getSupervisor } from "@/lib/runtime";
-import {
-  InvalidInvocationError,
-  PreFlightError,
-} from "@/lib/runner/types";
 
 export const dynamic = "force-dynamic";
 
@@ -39,15 +36,6 @@ export async function POST(
     });
     return NextResponse.json({ run }, { status: 201 });
   } catch (e) {
-    if (e instanceof InvalidInvocationError) {
-      return NextResponse.json({ error: e.message }, { status: 400 });
-    }
-    if (e instanceof PreFlightError) {
-      return NextResponse.json(
-        { error: e.message, environment: e.details },
-        { status: 503 },
-      );
-    }
-    return NextResponse.json({ error: "internal error" }, { status: 500 });
+    return mapSupervisorError(e);
   }
 }
